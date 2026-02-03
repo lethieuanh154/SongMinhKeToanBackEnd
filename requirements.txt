@@ -1,0 +1,25 @@
+# FastAPI Backend for TapHoa39KeToan
+# Python 3.10+
+
+# Web Framework
+fastapi==0.109.2
+uvicorn[standard]==0.27.1
+
+# Firebase Admin SDK
+firebase-admin==6.4.0
+
+# Pydantic for data validation
+pydantic==2.6.1
+pydantic-settings==2.1.0
+
+# CORS
+python-multipart==0.0.9
+
+# Environment variables
+python-dotenv==1.0.1
+
+# Date/time utilities
+python-dateutil==2.8.2
+
+# HTTP client (for external APIs)
+httpx==0.26.0
