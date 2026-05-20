@@ -2,12 +2,11 @@
 # exit on error
 set -o errexit
 
-# Set CARGO_HOME to a writable directory
-export CARGO_HOME=/opt/render/project/.cargo
-
-# Add Rust to the PATH
+# Force Cargo to use a writable directory
+export CARGO_HOME=/tmp/cargo
 export PATH=$CARGO_HOME/bin:$PATH
 
 # Install Python dependencies
+# Use --only-binary for Rust-dependent packages to avoid maturin build issues
 pip install --upgrade pip
-pip install -r requirements.txt
+pip install --only-binary=bcrypt,google-crc32c -r requirements.txt
