@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     app_version: str = "1.0.0"
     debug: bool = True
 
-    # Server
+    # Server (local: 127.0.0.1:5000, Render sets HOST=0.0.0.0 PORT=10000)
     host: str = "127.0.0.1"
     port: int = 5000
 
