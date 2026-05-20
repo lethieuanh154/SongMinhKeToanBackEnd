@@ -13,16 +13,33 @@ class Settings(BaseSettings):
     debug: bool = True
 
     # Server
-    host: str = "0.0.0.0"
-    port: int = 8000
+    host: str = "127.0.0.1"
+    port: int = 5000
 
     # CORS
     cors_origins: str = "http://localhost:4200,http://127.0.0.1:4200"
 
     # Firebase - có thể dùng JSON string hoặc file path
-    firebase_service_account: Optional[str] = None  # JSON string từ .env
-    firebase_service_account_path: str = "./firebase-service-account.json"
+    firebase_service_account_ketoan: Optional[str] = None  # JSON string từ .env
+    firebase_service_account_ketoan_path: str = "./firebase-service-account.json"
     firebase_project_id: str = "songminhketoan-15041989"
+
+    # Firebase - Supplies Invoices project (shared với TapHoa39BanHang)
+    firebase_service_account_supplies_invoices: Optional[str] = None  # JSON string từ .env
+    firebase_service_account_supplies_invoices_path: str = "./firebase-supplies-invoices-service-account.json"
+    firebase_supplies_invoices_project_id: str = "taphoa39-supplies-invoices"
+
+    # Firebase - Gmail / QuanLySongMinh project (stores Gmail OAuth tokens)
+    firebase_service_account_gmail: Optional[str] = None  # JSON string từ .env
+    firebase_service_account_gmail_path: str = "./firebase-gmail-service-account.json"
+    firebase_gmail_project_id: str = "quanlysongminh"
+
+    # Gmail UID - Firebase UID của tài khoản Gmail công ty (set một lần trong .env)
+    gmail_uid: str = ""
+
+    # Google OAuth (for Gmail token refresh)
+    google_client_id: str = ""
+    google_client_secret: str = ""
 
     @property
     def cors_origins_list(self) -> List[str]:

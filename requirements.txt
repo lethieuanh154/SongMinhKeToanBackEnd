@@ -23,3 +23,8 @@ python-dateutil==2.8.2
 
 # HTTP client (for external APIs)
 httpx==0.26.0
+
+# Google API (for Gmail integration)
+google-auth==2.40.2
+google-auth-oauthlib==1.2.1
+google-api-python-client==2.153.0

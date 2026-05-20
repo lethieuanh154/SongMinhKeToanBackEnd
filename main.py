@@ -5,10 +5,14 @@ Kế toán doanh nghiệp theo Thông tư 133/2016/TT-BTC
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+import logging
 import uvicorn
 
-from app.config import settings, initialize_firebase
-from app.routes import cash_voucher_router, warehouse_voucher_router
+# Configure logging to show INFO level
+logging.basicConfig(level=logging.INFO, format='%(name)s - %(levelname)s - %(message)s')
+
+from app.config import settings, initialize_firebase, initialize_supplies_firebase, initialize_gmail_firebase
+from app.routes import cash_voucher_router, warehouse_voucher_router, hddt_proxy_router, invoice_router, invoice_legacy_router, gmail_router
 
 
 @asynccontextmanager
@@ -17,6 +21,14 @@ async def lifespan(app: FastAPI):
     # Startup
     print("🚀 Starting TapHoa39KeToan Backend...")
     initialize_firebase()
+    try:
+        initialize_supplies_firebase()
+    except Exception as e:
+        print(f"⚠️ Supplies Firebase unavailable (invoice routes will fail): {e}")
+    try:
+        initialize_gmail_firebase()
+    except Exception as e:
+        print(f"⚠️ Gmail Firebase unavailable (gmail routes will fail): {e}")
     print(f"✅ Server ready at http://{settings.host}:{settings.port}")
     yield
     # Shutdown
@@ -35,6 +47,7 @@ Hệ thống Kế toán Doanh nghiệp theo Thông tư 133/2016/TT-BTC
 ### Modules:
 - **Phiếu Thu/Chi**: Quản lý thu chi tiền mặt/ngân hàng
 - **Phiếu Nhập/Xuất Kho**: Quản lý nhập xuất kho hàng hóa
+- **Hóa đơn đầu vào**: Đồng bộ và đối chiếu hóa đơn từ NCC
 
 ### Features:
 - CRUD operations cho tất cả chứng từ
@@ -81,6 +94,10 @@ async def health_check():
 # Register routers
 app.include_router(cash_voucher_router)
 app.include_router(warehouse_voucher_router)
+app.include_router(hddt_proxy_router)
+app.include_router(invoice_router)
+app.include_router(invoice_legacy_router)
+app.include_router(gmail_router)
 
 
 if __name__ == "__main__":
