@@ -29,7 +29,10 @@ async def lifespan(app: FastAPI):
         initialize_gmail_firebase()
     except Exception as e:
         print(f"⚠️ Gmail Firebase unavailable (gmail routes will fail): {e}")
-    print(f"✅ Server ready at http://{settings.host}:{settings.port}")
+    import os
+    _host = "0.0.0.0" if os.environ.get("PORT") else settings.host
+    _port = os.environ.get("PORT", settings.port)
+    print(f"✅ Server ready at http://{_host}:{_port}")
     yield
     # Shutdown
     print("👋 Shutting down...")
@@ -101,9 +104,13 @@ app.include_router(gmail_router)
 
 
 if __name__ == "__main__":
+    import os
+    is_render = bool(os.environ.get("RENDER"))
+    host = "0.0.0.0" if is_render else settings.host
+    port = int(os.environ.get("PORT", settings.port))
     uvicorn.run(
         "main:app",
-        host=settings.host,
-        port=settings.port,
-        reload=settings.debug
+        host=host,
+        port=port,
+        reload=not is_render  # no reload on production
     )
