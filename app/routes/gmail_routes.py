@@ -235,6 +235,10 @@ def _extract_supplier_name(subject: str, from_name: str) -> str:
     m = re.search(r'^(.+?)\s+gửi\s+hóa\s+đơn', subject, re.IGNORECASE)
     if m:
         return m.group(1).strip()
+    # Pattern 3: "... số_ NUMBER - COMPANY kính gửi ..." (EasyInvoice)
+    m = re.search(r'\d+\s*-\s*(.+?)\s+kính\s+gửi', subject, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
     return from_name
 
 
@@ -245,6 +249,40 @@ def _extract_invoice_no(subject: str) -> str:
         if m:
             return m.group(1)
     return ''
+
+
+_INVOICE_NO_BODY_PATTERN = re.compile(r'Số\s+hóa\s+đơn\s*:?\s*(\d+)', re.IGNORECASE)
+_INVOICE_SYMBOL_BODY_PATTERN = re.compile(r'Ký\s+hiệu\s*:?\s*([A-Z0-9]+)', re.IGNORECASE)
+# Attachment filename format: {mst}-{kyHieu}-{soHD_padded}.{ext}
+# e.g. 0402114198-1C26TAN-0000074.pdf
+_ATTACHMENT_INVOICE_PATTERN = re.compile(r'^\d{10,13}-([A-Z0-9]+)-(\d+)\.(xml|pdf)$', re.IGNORECASE)
+
+
+def _extract_invoice_fields_from_body(body_html: str) -> tuple:
+    """Extract (invoiceNo, invoiceSymbol) from email body HTML."""
+    text = re.sub(r'<[^>]+>', ' ', body_html)
+    invoice_no = ''
+    m = _INVOICE_NO_BODY_PATTERN.search(text)
+    if m:
+        invoice_no = m.group(1)
+    invoice_symbol = ''
+    m = _INVOICE_SYMBOL_BODY_PATTERN.search(text)
+    if m:
+        invoice_symbol = m.group(1)
+    return invoice_no, invoice_symbol
+
+
+def _extract_invoice_fields_from_attachments(attachments: list) -> tuple:
+    """Extract (invoiceNo, invoiceSymbol) from attachment filenames.
+    Format: {mst}-{kyHieu}-{soHD_padded}.xml|pdf → (invoiceNo_stripped, invoiceSymbol)
+    """
+    for name in attachments:
+        m = _ATTACHMENT_INVOICE_PATTERN.match(name)
+        if m:
+            symbol = m.group(1)
+            no = str(int(m.group(2)))  # 0000074 → 74
+            return no, symbol
+    return '', ''
 
 
 @router.get("/portal-links")
@@ -309,15 +347,39 @@ def get_portal_links(
                                 f"from={msg_data.get('from_address', '')} | "
                                 f"bodyLen={len(body)} | bodySnippet={body_snippet}")
 
-                # Extract supplierTaxCode from credentials if available
+                # Extract supplierTaxCode from credentials if available, fallback to body-extracted taxCode
                 credentials = portal_info.get('credentials', {})
-                supplier_tax_code = credentials.get('taxCode', '')
+                supplier_tax_code = credentials.get('taxCode', '') or portal_info.get('taxCode', '')
 
-                # Use body-extracted invoiceNo/invoiceSymbol as fallback
+                # Extract invoiceNo: subject → portal_info → attachments → body HTML
                 invoice_no = _extract_invoice_no(msg_data.get('subject', ''))
-                if not invoice_no and portal_info.get('invoiceNo'):
-                    invoice_no = portal_info['invoiceNo']
                 invoice_symbol = portal_info.get('invoiceSymbol', '')
+                if not invoice_no:
+                    if portal_info.get('invoiceNo'):
+                        invoice_no = portal_info['invoiceNo']
+                    if not invoice_no:
+                        att_no, att_symbol = _extract_invoice_fields_from_attachments(msg_data.get('attachments', []))
+                        if att_no:
+                            invoice_no = att_no
+                        if not invoice_symbol and att_symbol:
+                            invoice_symbol = att_symbol
+                    if not invoice_no and msg_data.get('bodyHtml'):
+                        body_no, body_symbol = _extract_invoice_fields_from_body(msg_data['bodyHtml'])
+                        invoice_no = body_no
+                        if not invoice_symbol:
+                            invoice_symbol = body_symbol
+
+                # KIOTVIET: extract invoiceSymbol + seller MST from subject
+                if portal_info.get('provider') == 'KIOTVIET':
+                    subj = msg_data.get('subject', '')
+                    if not invoice_symbol:
+                        m = re.search(r's[oố]\s+\d+\s+([A-Z][A-Z0-9]{2,})', subj)
+                        if m:
+                            invoice_symbol = m.group(1)
+                    if not supplier_tax_code:
+                        m = re.search(r'\bMST\s+(\d{10,13})(?:-\d+)?', subj)
+                        if m:
+                            supplier_tax_code = m.group(1)
 
                 results.append({
                     'gmailId': msg_data['gmail_id'],

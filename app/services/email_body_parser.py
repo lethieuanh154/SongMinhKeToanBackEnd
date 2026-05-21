@@ -42,8 +42,8 @@ PROVIDER_PATTERNS = {
         'url_contains': ['meinvoice.vn'],
         'href_pattern': r'https?://www\.meinvoice\.vn/tra-cuu/\?sc=[^"\'>\s]+',
         'body_extract_patterns': {
-            'invoiceNo': r'(?:S[oố]\s*(?:h[oó]a\s*[dđ][oơ]n)?|S[oố])\s*[:\s]\s*(\d{5,10})',
-            'invoiceSymbol': r'[Kk][yýYÝ]\s*hi[eệ]u\s*[:\s]\s*([A-Z0-9]{5,10})',
+            'invoiceNo': r'S[oố]\s*:\s*(\d+)',
+            'invoiceSymbol': r'[Kk][yýYÝ]\s*hi[eệ]u\s*:?\s*([A-Z0-9]{3,10})',
             'lookupCode': r'(?:nh[aậ]p\s*m[aã]\s*s[oố]|m[aã]\s*s[oố])\s*[:\s]\s*([A-Za-z0-9_]+)',
         },
     },
@@ -62,6 +62,19 @@ PROVIDER_PATTERNS = {
         'group': 'A',
         'url_contains': ['kiotviet.vn'],
         'href_pattern': r'https?://tracuuhoadon\.kiotviet\.vn/\?shd=[^"\'>\s]+',
+        'body_extract_patterns': {
+            'invoiceNo': r'[?&]shd=(\d+)',
+        },
+    },
+    'FASTINVOICE': {
+        'group': 'A',
+        'url_contains': ['einvoice.fast.com.vn'],
+        'href_pattern': r'https?://einvoice\.fast\.com\.vn/index\.aspx\?type=1&[^"\'>\s]+',
+        'pdf_href_pattern': r'https?://einvoice\.fast\.com\.vn/index\.aspx\?type=3&[^"\'>\s]+',
+        'body_extract_patterns': {
+            'invoiceNo': r'S[oố]\s+h[oó]a\s+[dđ][oơ]n\s*(?:\([^)]+\))?\s*:\s*(\d+)',
+            'invoiceSymbol': r'K[yý]\s+hi[eệ]u\s+h[oó]a\s+[dđ][oơ]n\s*(?:\([^)]+\))?\s*:\s*([A-Z0-9]+)',
+        },
     },
     'EHOADON': {
         'group': 'A',
@@ -76,8 +89,8 @@ PROVIDER_PATTERNS = {
         'href_pattern': r'https?://tracuuhoadon\.mobifoneinvoice\.vn/?',
         'portal_url': 'http://tracuuhoadon.mobifoneinvoice.vn/',
         'credential_patterns': {
-            'taxCode': r'Mã đơn vị[:\s]*<strong>([^<]+)</strong>',
-            'secretCode': r'Mã bảo mật[:\s]*<strong>\s*([^<]+)</strong>',
+            'taxCode': r'Mã\s*đơn\s*vị\s*[:\s]+(\d{10,13})',
+            'secretCode': r'Mã\s*bảo\s*mật\s*[:\s]+([A-Za-z0-9]+)',
         },
     },
     'VIETTEL': {
@@ -88,6 +101,10 @@ PROVIDER_PATTERNS = {
         'credential_patterns': {
             'taxCode': r'mã\s*số\s*thuế\s*bên\s*bán\s+(\d{10,14})',
             'secretCode': r'mã\s*số\s*bí\s*mật\s+([A-Z0-9]+)',
+        },
+        'body_extract_patterns': {
+            'invoiceNo': r's[oố]\s+[A-Z]\d+[A-Z]+(\d+)',
+            'invoiceSymbol': r's[oố]\s+([A-Z]\d+[A-Z]+)\d+',
         },
     },
     'MINVOICE': {
@@ -101,12 +118,14 @@ PROVIDER_PATTERNS = {
         },
     },
     'EINVOICE': {
-        'group': 'B',
-        'url_contains': ['einvoice.vn'],
-        'href_pattern': r'https?://(?:[^/]*\.)?einvoice\.vn/tra-cuu',
-        'portal_url': 'https://einvoice.vn/tra-cuu',
-        'credential_patterns': {
-            'lookupCode': r'Mã\s*tra\s*cứu\s*hóa\s*đơn[:\s]*(?:<[^>]*>\s*)*([A-Za-z0-9]+)',
+        'group': 'A',
+        'url_contains': ['easyinvoice.com.vn'],
+        'href_pattern': r'https?://[^.\s/]+\.easyinvoice\.com\.vn/Invoice/ViewFromEmail\?token=[^"\'>\s]+',
+        'pdf_href_pattern': r'https?://[^.\s/]+\.easyinvoice\.com\.vn/Invoice/DownloadInvPdf\?token=[^"\'>\s]+',
+        'body_extract_patterns': {
+            'invoiceNo': r'Số\s+hóa\s+đơn\s*:?\s*(\d+)(?!\w)',
+            'invoiceSymbol': r'Ký\s+hiệu\s+mẫu\s+số\s+hóa\s+đơn\s*:?\s*([A-Z0-9]+)',
+            'taxCode': r'(?<!\()(?:[Mm][aã]\s*s[oố]\s*thu[eế]|MST)\s*:?\s*(\d{10,13})',
         },
     },
 
@@ -121,8 +140,9 @@ PROVIDER_PATTERNS = {
 
 # Generic patterns to extract invoice info from email body (clean text, no HTML tags)
 _GENERIC_BODY_PATTERNS = {
-    'invoiceNo': r'(?:S[oố]\s*(?:h[oó]a\s*[dđ][oơ]n)?|S[oố])\s*[:\s]\s*(\d{5,10})',
-    'invoiceSymbol': r'[Kk][yýYÝ]\s*hi[eệ]u\s*[:\s]\s*([A-Z0-9]{5,10})',
+    'invoiceNo': r'(?:S[oố]\s+h[oó]a\s*[dđ][oơ]n|[Hh][oó]a\s*[dđ][oơ]n\s+s[oố])\s*:?\s*(\d+)',
+    'invoiceSymbol': r'[Kk][yýYÝ]\s*hi[eệ]u\s*:?\s*([A-Z0-9]{3,10})',
+    'taxCode': r'(?<!\()(?:[Mm][aã]\s*s[oố]\s*thu[eế]|MST)\s*:?\s*(\d{10,13})',
 }
 
 
@@ -276,22 +296,28 @@ class EmailBodyParser:
     def _extract_pattern(self, html: str, pattern: str) -> Optional[str]:
         """Extract first match of regex pattern from HTML."""
         match = re.search(pattern, html, re.IGNORECASE)
-        return match.group(0) if match else None
+        if match:
+            return html_module.unescape(match.group(0))
+        return None
 
     def _extract_credentials(self, html: str, config: dict) -> Dict:
         """Extract credentials from email body for Group B providers."""
         credentials = {}
         patterns = config.get('credential_patterns', {})
 
-        # Decode HTML entities (e.g. &atilde; → ã, &oacute; → ó) so regex works with plain text
         decoded_html = html_module.unescape(html)
+        clean_text = re.sub(r'<[^>]+>', ' ', decoded_html)
+        clean_text = re.sub(r'\s+', ' ', clean_text)
 
         for key, pattern in patterns.items():
-            match = re.search(pattern, decoded_html, re.IGNORECASE | re.DOTALL)
+            # Try clean text first (handles plain text emails and simple HTML)
+            match = re.search(pattern, clean_text, re.IGNORECASE)
+            if not match:
+                # Fallback: raw HTML (for patterns anchored on HTML tags like <strong>)
+                match = re.search(pattern, decoded_html, re.IGNORECASE | re.DOTALL)
             if match:
                 credentials[key] = match.group(1).strip()
             else:
-                # Debug: find nearby context for the keyword
                 for keyword in ['tra cứu', 'bí mật', 'bảo mật', 'mã số', 'lookup', 'secret']:
                     idx = decoded_html.lower().find(keyword)
                     if idx >= 0:
