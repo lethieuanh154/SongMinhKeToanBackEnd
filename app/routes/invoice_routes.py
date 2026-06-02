@@ -94,6 +94,40 @@ async def get_reconciliation_results(
     return {'results': results, 'count': len(results)}
 
 
+@router.post('/reconciliation/save-live')
+async def save_live_reconciliation(data: dict = {}):
+    """Save live reconciliation results (Gmail vs GDT) to Firestore."""
+    results = data.get('results', [])
+    if not results:
+        return {'success': False, 'error': 'No results to save', 'saved': 0}
+
+    db = get_supplies_db()
+    from datetime import datetime
+
+    # Clear previous live reconciliation results
+    for doc in db.collection('invoice_reconciliation').where(filter=FieldFilter('periodKey', '==', 'live')).stream():
+        doc.reference.delete()
+
+    # Save new results in batches
+    batch = db.batch()
+    batch_count = 0
+    for rec in results:
+        rec['periodKey'] = 'live'
+        rec['source'] = 'live'
+        rec['checkedAt'] = datetime.utcnow()
+        doc_ref = db.collection('invoice_reconciliation').document()
+        batch.set(doc_ref, rec)
+        batch_count += 1
+        if batch_count >= 500:
+            batch.commit()
+            batch = db.batch()
+            batch_count = 0
+    if batch_count > 0:
+        batch.commit()
+
+    return {'success': True, 'saved': len(results)}
+
+
 @router.delete('/reconciliation/results/{result_id}')
 async def delete_reconciliation_result(result_id: str):
     db = get_supplies_db()

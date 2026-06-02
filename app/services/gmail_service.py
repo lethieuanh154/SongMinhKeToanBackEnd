@@ -186,6 +186,123 @@ class GmailService:
             extract(payload['parts'])
         return filenames
 
+    # =========================================================
+    # Attachment download methods (copied from TapHoa39BackEnd)
+    # =========================================================
+
+    def get_message_metadata(self, message_id: str) -> Optional[Dict[str, Any]]:
+        """Get email metadata: from, subject, date, snippet, attachment filenames."""
+        try:
+            message = self.service.users().messages().get(
+                userId='me', id=message_id, format='full'
+            ).execute()
+
+            headers = {h['name']: h['value'] for h in message.get('payload', {}).get('headers', [])}
+            from_raw = headers.get('From', '')
+            from_email = self._extract_email(from_raw)
+
+            return {
+                'gmail_id': message_id,
+                'from_address': from_email,
+                'from_domain': self._extract_domain(from_email),
+                'subject': headers.get('Subject', ''),
+                'date': self._parse_date(headers.get('Date', '')).isoformat(),
+                'snippet': message.get('snippet', ''),
+                'attachments': self._extract_attachments(message),
+                'internal_date': int(message.get('internalDate', 0)),
+            }
+        except RefreshError as error:
+            raise GmailTokenExpiredError(f"Gmail token hết hạn. ({error})")
+        except HttpError as error:
+            if error.resp.status == 401:
+                raise GmailTokenExpiredError("Gmail token hết hạn. Vui lòng đăng nhập lại.")
+            logger.error(f"Error fetching message {message_id}: {error}")
+            return None
+
+    def get_xml_attachment(self, message_id: str) -> Optional[bytes]:
+        """Download first XML attachment from a message."""
+        return self._get_attachment_by_ext(message_id, '.xml', 'xml')
+
+    def get_pdf_attachment(self, message_id: str) -> Optional[tuple]:
+        """Download first PDF attachment. Returns (bytes, filename) or None."""
+        return self._get_attachment_by_ext(message_id, '.pdf', 'application/pdf', return_filename=True)
+
+    def get_zip_attachment(self, message_id: str) -> Optional[tuple]:
+        """Download first ZIP attachment. Returns (bytes, filename) or None."""
+        return self._get_attachment_by_ext(message_id, '.zip', 'application/zip', return_filename=True)
+
+    def _get_attachment_by_ext(
+        self, message_id: str, ext: str, mime_hint: str, return_filename: bool = False
+    ) -> Optional[Any]:
+        """Generic attachment downloader by file extension."""
+        try:
+            message = self.service.users().messages().get(
+                userId='me', id=message_id, format='full'
+            ).execute()
+
+            def find_part(parts: List[Dict]) -> Optional[Dict]:
+                for part in parts:
+                    filename = part.get('filename', '').lower()
+                    mime_type = part.get('mimeType', '').lower()
+                    if filename.endswith(ext) or mime_hint in mime_type:
+                        return part
+                    if 'parts' in part:
+                        result = find_part(part['parts'])
+                        if result:
+                            return result
+                return None
+
+            payload = message.get('payload', {})
+            target_part = find_part(payload.get('parts', []))
+
+            if not target_part:
+                return None
+
+            filename = target_part.get('filename', f'attachment{ext}')
+            attachment_id = target_part.get('body', {}).get('attachmentId')
+
+            if attachment_id:
+                attachment = self.service.users().messages().attachments().get(
+                    userId='me', messageId=message_id, id=attachment_id
+                ).execute()
+                data = base64.urlsafe_b64decode(attachment.get('data', ''))
+            else:
+                raw = target_part.get('body', {}).get('data', '')
+                data = base64.urlsafe_b64decode(raw) if raw else None
+
+            if not data:
+                return None
+
+            if return_filename:
+                return (data, filename)
+            return data
+
+        except RefreshError as error:
+            raise GmailTokenExpiredError(f"Gmail token hết hạn. ({error})")
+        except HttpError as error:
+            if error.resp.status == 401:
+                raise GmailTokenExpiredError("Gmail token hết hạn. Vui lòng đăng nhập lại.")
+            logger.error(f"Error getting {ext} attachment from {message_id}: {error}")
+            return None
+
+    def get_email_body_html(self, message_id: str) -> Optional[str]:
+        """Get email body as HTML string (standalone fetch)."""
+        try:
+            message = self.service.users().messages().get(
+                userId='me', id=message_id, format='full'
+            ).execute()
+
+            payload = message.get('payload', {})
+            return self._extract_body_html(payload)
+
+        except RefreshError as error:
+            raise GmailTokenExpiredError(f"Gmail token hết hạn. ({error})")
+        except HttpError as error:
+            if error.resp.status == 401:
+                raise GmailTokenExpiredError("Gmail token hết hạn. Vui lòng đăng nhập lại.")
+            logger.error(f"Error getting email body for {message_id}: {error}")
+            return None
+
     # --- helpers ---
 
     def _extract_email(self, from_header: str) -> str:

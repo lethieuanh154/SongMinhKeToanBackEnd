@@ -7,6 +7,7 @@ Tránh vấn đề CORS khi gọi từ frontend
 import asyncio
 import logging
 import re
+import time
 
 import requests
 from fastapi import APIRouter, HTTPException, Request, Query
@@ -96,7 +97,12 @@ def solve_svg_captcha(svg_content: str) -> str:
 async def get_captcha():
     try:
         response = await asyncio.to_thread(
-            requests.get, f"{HDDT_API_BASE}/captcha", timeout=15, verify=True
+            requests.get,
+            f"{HDDT_API_BASE}/captcha",
+            params={"t": int(time.time() * 1000)},
+            headers={"Cache-Control": "no-cache, no-store", "Pragma": "no-cache"},
+            timeout=15,
+            verify=True
         )
 
         if response.status_code == 200:

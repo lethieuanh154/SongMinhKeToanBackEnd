@@ -1,23 +1,31 @@
 """
 Gmail API routes for KeToanBackEnd.
-GET /api/gmail/auth/url      — Redirect popup to Google OAuth (no uid needed)
-GET /api/gmail/auth/callback — OAuth callback, saves tokens, postMessage uid+email
-GET /api/gmail/labels        — List Gmail labels for a uid
-GET /api/gmail/portal-links  — Fetch emails from Gmail, parse portal URLs
+GET  /api/gmail/auth/url         — Redirect popup to Google OAuth (no uid needed)
+GET  /api/gmail/auth/callback    — OAuth callback, saves tokens, postMessage uid+email
+GET  /api/gmail/labels           — List Gmail labels for a uid
+GET  /api/gmail/portal-links     — Fetch emails from Gmail, parse portal URLs + optional attachment parsing
+POST /api/gmail/emails/{id}/process  — Process single email: download attachment → parse XML/PDF
+POST /api/gmail/scrape-portal-xml    — Download XML from portal URLs via Playwright, cache amounts
 """
 import re
+import base64
 import secrets
 import logging
+import asyncio
 from typing import Optional
 
-from fastapi import APIRouter, Query, HTTPException, Request
+from fastapi import APIRouter, Query, HTTPException, Request, Body
 from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
+from pydantic import BaseModel
 import httpx
 
 from app.config.firebase import get_gmail_db
 from app.config.settings import settings
 from app.services.gmail_service import GmailService, GmailTokenExpiredError
 from app.services.email_body_parser import EmailBodyParser
+from app.services.invoice_parsers import TaxInvoiceXMLParser
+from app.services.zip_extractor import extract_xml_from_zip, extract_pdf_from_zip
+from app.services.playwright_scraper import scrape_xml as playwright_scrape_xml, get_provider_config as get_scraper_config
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +217,151 @@ async def get_labels(uid: Optional[str] = Query(None, description="Firebase user
         return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
 
 
+# --- Process Email: download attachment → parse XML/PDF ---
+
+@router.post("/emails/{email_id}/process")
+def process_email(
+    email_id: str,
+    body: dict = Body(default={}),
+    uid: Optional[str] = Query(None),
+):
+    """POST /api/gmail/emails/{email_id}/process
+    Auto-detect attachment type and process:
+    - XML → parse with TaxInvoiceXMLParser
+    - ZIP → extract XML → parse (or extract PDF → return for Gemini)
+    - PDF → return base64 for frontend Gemini processing
+    - None → return type='none'
+    """
+    effective_uid = body.get('uid') or uid or settings.gmail_uid
+    if not effective_uid:
+        return JSONResponse(status_code=400, content={
+            "success": False, "error": "uid is required"
+        })
+
+    try:
+        gmail = _get_gmail_service(effective_uid)
+        metadata = gmail.get_message_metadata(email_id)
+
+        if not metadata:
+            _save_refreshed_token(gmail)
+            return JSONResponse(status_code=404, content={
+                "success": False, "error": "Email not found"
+            })
+
+        # Extract portal URL from email body HTML
+        portal_info = {}
+        try:
+            email_body_html = gmail.get_email_body_html(email_id)
+            if email_body_html:
+                portal_info = _body_parser.extract_portal_url(email_body_html)
+        except Exception as e:
+            logger.warning(f"Failed to extract portal URL: {e}")
+
+        attachments = metadata.get('attachments', [])
+        attachments_lower = [a.lower() for a in attachments]
+
+        has_xml = any(a.endswith('.xml') for a in attachments_lower)
+        has_zip = any(a.endswith('.zip') for a in attachments_lower)
+        has_pdf = any(a.endswith('.pdf') for a in attachments_lower)
+
+        portal_fields = {
+            'portalUrl': portal_info.get('portalUrl', ''),
+            'invoiceProvider': portal_info.get('provider', ''),
+            'portalPdfUrl': portal_info.get('portalPdfUrl', ''),
+            'portalCredentials': portal_info.get('credentials', {}),
+        }
+
+        # Priority 1: Direct XML attachment
+        if has_xml:
+            xml_bytes = gmail.get_xml_attachment(email_id)
+            if xml_bytes:
+                invoices, errors = TaxInvoiceXMLParser.parse(xml_bytes)
+                _save_refreshed_token(gmail)
+                return {
+                    'success': True,
+                    'type': 'xml',
+                    'invoices': invoices,
+                    'parse_errors': errors,
+                    'email': metadata,
+                    **portal_fields
+                }
+
+        # Priority 2: ZIP → extract XML first, then PDF
+        if has_zip:
+            zip_result = gmail.get_zip_attachment(email_id)
+            if zip_result:
+                zip_bytes, zip_name = zip_result
+
+                xml_result = extract_xml_from_zip(zip_bytes)
+                if xml_result:
+                    xml_bytes, xml_name = xml_result
+                    invoices, errors = TaxInvoiceXMLParser.parse(xml_bytes)
+                    _save_refreshed_token(gmail)
+                    return {
+                        'success': True,
+                        'type': 'zip_xml',
+                        'invoices': invoices,
+                        'parse_errors': errors,
+                        'source_file': xml_name,
+                        'email': metadata,
+                        **portal_fields
+                    }
+
+                pdf_result = extract_pdf_from_zip(zip_bytes)
+                if pdf_result:
+                    pdf_bytes, pdf_name = pdf_result
+                    pdf_b64 = base64.b64encode(pdf_bytes).decode('utf-8')
+                    _save_refreshed_token(gmail)
+                    return {
+                        'success': True,
+                        'type': 'zip_pdf',
+                        'needs_gemini': True,
+                        'pdf_base64': pdf_b64,
+                        'pdf_filename': pdf_name,
+                        'email': metadata,
+                        **portal_fields
+                    }
+
+        # Priority 3: Direct PDF attachment
+        if has_pdf:
+            pdf_result = gmail.get_pdf_attachment(email_id)
+            if pdf_result:
+                pdf_bytes, pdf_name = pdf_result
+                pdf_b64 = base64.b64encode(pdf_bytes).decode('utf-8')
+                _save_refreshed_token(gmail)
+                return {
+                    'success': True,
+                    'type': 'pdf',
+                    'needs_gemini': True,
+                    'pdf_base64': pdf_b64,
+                    'pdf_filename': pdf_name,
+                    'email': metadata,
+                    **portal_fields
+                }
+
+        # No processable attachment
+        _save_refreshed_token(gmail)
+        return {
+            'success': True,
+            'type': 'none',
+            'message': 'Không có file đính kèm xử lý được.',
+            'email': metadata,
+            **portal_fields
+        }
+
+    except HTTPException:
+        raise
+    except GmailTokenExpiredError as e:
+        return JSONResponse(status_code=401, content={
+            "success": False, "error": str(e), "code": "TOKEN_EXPIRED"
+        })
+    except Exception as e:
+        logger.error(f"Error processing email {email_id}: {e}")
+        return JSONResponse(status_code=500, content={
+            "success": False, "error": str(e)
+        })
+
+
 # --- Portal Links: fetch emails from Gmail and parse portal URLs ---
 
 _body_parser = EmailBodyParser()
@@ -285,15 +438,97 @@ def _extract_invoice_fields_from_attachments(attachments: list) -> tuple:
     return '', ''
 
 
+def _parse_attachment_for_amounts(gmail: GmailService, email_id: str, attachments: list) -> dict:
+    """Download and parse XML/ZIP attachment to extract invoice amounts.
+    Returns dict with amounts or empty dict if no parseable attachment."""
+    attachments_lower = [a.lower() for a in attachments]
+
+    has_xml = any(a.endswith('.xml') for a in attachments_lower)
+    has_zip = any(a.endswith('.zip') for a in attachments_lower)
+    has_pdf = any(a.endswith('.pdf') for a in attachments_lower)
+
+    # Priority 1: XML attachment
+    if has_xml:
+        try:
+            xml_bytes = gmail.get_xml_attachment(email_id)
+            if xml_bytes:
+                invoices, _ = TaxInvoiceXMLParser.parse(xml_bytes)
+                if invoices:
+                    inv = invoices[0]
+                    return {
+                        'hasAmounts': True,
+                        'parseSource': 'xml_attachment',
+                        'needsAiProcessing': False,
+                        'invoiceNo': inv.get('invoiceNo', ''),
+                        'invoiceSymbol': inv.get('invoiceSymbol', ''),
+                        'invoiceDate': inv.get('invoiceDate', ''),
+                        'supplierTaxCode': inv.get('sellerTaxCode', ''),
+                        'supplierName': inv.get('sellerName', ''),
+                        'totalBeforeVat': inv.get('totalBeforeVat', 0),
+                        'vatAmount': inv.get('vatAmount', 0),
+                        'vatRate': inv.get('vatRate', 0),
+                        'totalAmount': inv.get('totalAmount', 0),
+                        'items': inv.get('items', []),
+                    }
+        except Exception as e:
+            logger.warning(f"[parse_attachment] XML parse failed for {email_id}: {e}")
+
+    # Priority 2: ZIP → extract XML
+    if has_zip:
+        try:
+            zip_result = gmail.get_zip_attachment(email_id)
+            if zip_result:
+                zip_bytes, _ = zip_result
+                xml_result = extract_xml_from_zip(zip_bytes)
+                if xml_result:
+                    xml_bytes, _ = xml_result
+                    invoices, _ = TaxInvoiceXMLParser.parse(xml_bytes)
+                    if invoices:
+                        inv = invoices[0]
+                        return {
+                            'hasAmounts': True,
+                            'parseSource': 'zip_xml',
+                            'needsAiProcessing': False,
+                            'invoiceNo': inv.get('invoiceNo', ''),
+                            'invoiceSymbol': inv.get('invoiceSymbol', ''),
+                            'invoiceDate': inv.get('invoiceDate', ''),
+                            'supplierTaxCode': inv.get('sellerTaxCode', ''),
+                            'supplierName': inv.get('sellerName', ''),
+                            'totalBeforeVat': inv.get('totalBeforeVat', 0),
+                            'vatAmount': inv.get('vatAmount', 0),
+                            'vatRate': inv.get('vatRate', 0),
+                            'totalAmount': inv.get('totalAmount', 0),
+                            'items': inv.get('items', []),
+                        }
+        except Exception as e:
+            logger.warning(f"[parse_attachment] ZIP parse failed for {email_id}: {e}")
+
+    # Priority 3: PDF — cannot parse server-side (needs Gemini AI)
+    if has_pdf:
+        return {
+            'hasAmounts': False,
+            'parseSource': 'none',
+            'needsAiProcessing': True,
+        }
+
+    return {
+        'hasAmounts': False,
+        'parseSource': 'none',
+        'needsAiProcessing': False,
+    }
+
+
 @router.get("/portal-links")
 def get_portal_links(
     uid: Optional[str] = Query(None),
     label_id: Optional[str] = Query(None, alias='label_id'),
     label_name: Optional[str] = Query(None, alias='label_name'),
     days_back: int = Query(default=30, ge=1, le=365),
-    page_size: int = Query(default=30, ge=1, le=100),
+    page_size: int = Query(default=30, ge=1, le=500),
+    parse_attachments: bool = Query(default=False, description="Parse XML/ZIP attachments to extract invoice amounts"),
 ):
-    """GET /api/gmail/portal-links — Fetch emails from Gmail label, parse body for portal URLs."""
+    """GET /api/gmail/portal-links — Fetch emails from Gmail label, parse body for portal URLs.
+    When parse_attachments=true, also downloads XML/ZIP attachments and parses invoice data."""
     effective_uid = uid or settings.gmail_uid
     if not effective_uid:
         return JSONResponse(status_code=400, content={
@@ -381,7 +616,7 @@ def get_portal_links(
                         if m:
                             supplier_tax_code = m.group(1)
 
-                results.append({
+                result_item = {
                     'gmailId': msg_data['gmail_id'],
                     'gmailThreadId': msg_data.get('thread_id', msg_data['gmail_id']),
                     'invoiceNo': invoice_no,
@@ -396,7 +631,28 @@ def get_portal_links(
                     'gmailFrom': msg_data.get('from_address', ''),
                     'gmailSubject': msg_data.get('subject', ''),
                     'attachments': msg_data.get('attachments', []),
-                })
+                }
+
+                # Parse XML/ZIP attachment to extract amounts when requested
+                if parse_attachments:
+                    parsed = _parse_attachment_for_amounts(
+                        gmail, msg_data['gmail_id'], msg_data.get('attachments', [])
+                    )
+                    result_item.update(parsed)
+                    # Override metadata fields with parsed data (more accurate than regex)
+                    if parsed.get('hasAmounts'):
+                        if parsed.get('invoiceNo'):
+                            result_item['invoiceNo'] = parsed['invoiceNo']
+                        if parsed.get('invoiceSymbol'):
+                            result_item['invoiceSymbol'] = parsed['invoiceSymbol']
+                        if parsed.get('supplierTaxCode'):
+                            result_item['supplierTaxCode'] = parsed['supplierTaxCode']
+                        if parsed.get('supplierName'):
+                            result_item['supplierName'] = parsed['supplierName']
+                        if parsed.get('invoiceDate'):
+                            result_item['invoiceDate'] = parsed['invoiceDate']
+
+                results.append(result_item)
             except Exception as e:
                 logger.error(f"[portal-links] msg {i+1}/{len(stubs)} id={stub['id']}: {type(e).__name__}: {e}")
                 parse_errors += 1
@@ -422,3 +678,101 @@ def get_portal_links(
     except Exception as e:
         logger.error(f"[portal-links] Error uid={effective_uid}: {type(e).__name__}: {e}")
         return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
+
+
+# --- Scrape portal XML via Playwright ---
+
+class ScrapePortalItem(BaseModel):
+    gmailId: str
+    portalUrl: str
+    provider: str = ''
+    credentials: dict = {}
+
+class ScrapePortalRequest(BaseModel):
+    items: list[ScrapePortalItem]
+
+_SCRAPE_SEMAPHORE = asyncio.Semaphore(3)  # max 3 concurrent browser sessions
+
+
+async def _scrape_one(item: ScrapePortalItem) -> dict:
+    async with _SCRAPE_SEMAPHORE:
+        try:
+            db = get_gmail_db()
+            pconfig = get_scraper_config(db, item.provider) if item.provider else None
+            xml_bytes = await playwright_scrape_xml(
+                item.portalUrl, item.provider, item.credentials or None,
+                provider_config=pconfig
+            )
+            if not xml_bytes:
+                return {'gmailId': item.gmailId, 'success': False, 'error': 'no_xml'}
+
+            invoices, errors = TaxInvoiceXMLParser.parse(xml_bytes)
+            if not invoices:
+                return {'gmailId': item.gmailId, 'success': False, 'error': f'parse_failed: {errors}'}
+
+            inv = invoices[0]
+            amounts = {
+                'hasAmounts': True,
+                'parseSource': 'portal_xml',
+                'totalBeforeVat': inv.get('totalBeforeVat', 0),
+                'vatAmount': inv.get('vatAmount', 0),
+                'vatRate': inv.get('vatRate', 0),
+                'totalAmount': inv.get('totalAmount', 0),
+                'supplierTaxCode': inv.get('sellerTaxCode', ''),
+                'supplierName': inv.get('sellerName', ''),
+                'invoiceNo': inv.get('invoiceNo', ''),
+                'invoiceSymbol': inv.get('invoiceSymbol', ''),
+                'invoiceDate': inv.get('invoiceDate', ''),
+            }
+
+            # Cache to Firestore (gmail db)
+            try:
+                db = get_gmail_db()
+                db.collection('portal_link_amounts').document(item.gmailId).set(amounts)
+                logger.info(f"[scrape] Cached amounts for gmailId={item.gmailId}")
+            except Exception as e:
+                logger.warning(f"[scrape] Firestore cache failed for {item.gmailId}: {e}")
+
+            return {'gmailId': item.gmailId, 'success': True, 'amounts': amounts}
+
+        except Exception as e:
+            logger.error(f"[scrape] Error for gmailId={item.gmailId}: {e}")
+            return {'gmailId': item.gmailId, 'success': False, 'error': str(e)}
+
+
+@router.post("/scrape-portal-xml")
+async def scrape_portal_xml(body: ScrapePortalRequest):
+    """POST /api/gmail/scrape-portal-xml
+    Download XML from invoice portal URLs, parse amounts, cache in Firestore.
+    Returns per-item results.
+    """
+    if not body.items:
+        return {'success': True, 'results': []}
+
+    # Check Firestore cache first
+    db = get_gmail_db()
+    items_to_scrape = []
+    cached_results = []
+    for item in body.items:
+        try:
+            doc = db.collection('portal_link_amounts').document(item.gmailId).get()
+            if doc.exists:
+                cached = doc.to_dict()
+                if cached.get('hasAmounts'):
+                    cached_results.append({'gmailId': item.gmailId, 'success': True, 'amounts': cached, 'cached': True})
+                    logger.info(f"[scrape] Cache hit for gmailId={item.gmailId}")
+                    continue
+        except Exception:
+            pass
+        items_to_scrape.append(item)
+
+    logger.info(f"[scrape] {len(cached_results)} cached, {len(items_to_scrape)} to scrape")
+
+    scraped = await asyncio.gather(*[_scrape_one(i) for i in items_to_scrape])
+
+    return {
+        'success': True,
+        'results': cached_results + list(scraped),
+        'cached': len(cached_results),
+        'scraped': len(items_to_scrape),
+    }
